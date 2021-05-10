@@ -4,11 +4,12 @@
 const Web3 = require("web3");
 const BigNumber = require('bignumber.js');
 const ethers = require("ethers");
-const fs = require('fs')
 
 const bridge = require("./abi/Bridge.json");
 const handler = require("./abi/ERC20Handler.json");
 const erc20 = require("./abi/IERC20.json");
+const {log, createDataHash, ProposalStatus} = require("./common");
+
 /**
  * Deposit Event
  * {
@@ -51,124 +52,52 @@ const erc20 = require("./abi/IERC20.json");
     _amount: '10000000000000000000'
   }
 */
-const chains = {
-  "2": {
-    chainId: 2,
-    name: "Ava",
-    web3: new Web3(process.argv[3]),
-    fromBlock: 29954,
-    bridgeAddress: "0x6460777cDa22AD67bBb97536FFC446D65761197E",
-    handlerAddress: "0x6147F5a1a4eEa5C529e2F375Bd86f8F58F8Bc990",
-    explorerBase: "https://cchain.explorer.avax.network/tx/",
-    expiry: 7200000,
-  },
-  "1": {
-    chainId: 1,
-    name: "Ethereum",
-    web3: new Web3(process.argv[2]),
-    fromBlock: 12388196,
-    // fromBlock: 11688196,
-    bridgeAddress: "0x96B845aBE346b49135B865E5CeDD735FC448C3aD",
-    handlerAddress: "0xdAC7Bb7Ce4fF441A235F08408e632FA1D799A147",
-    explorerBase: "https://etherscan.io/tx/",
-    expiry: 100,
-  },
-}
+// const chains = {
+//   "2": {
+//     chainId: 2,
+//     name: "Ava",
+//     web3: new Web3(process.argv[3]),
+//     fromBlock: 29954,
+//     bridgeAddress: "0x6460777cDa22AD67bBb97536FFC446D65761197E",
+//     handlerAddress: "0x6147F5a1a4eEa5C529e2F375Bd86f8F58F8Bc990",
+//     explorerBase: "https://cchain.explorer.avax.network/tx/",
+//     expiry: 7200000,
+//   },
+//   "1": {
+//     chainId: 1,
+//     name: "Ethereum",
+//     web3: new Web3(process.argv[2]),
+//     fromBlock: 12388196,
+//     // fromBlock: 11688196,
+//     bridgeAddress: "0x96B845aBE346b49135B865E5CeDD735FC448C3aD",
+//     handlerAddress: "0xdAC7Bb7Ce4fF441A235F08408e632FA1D799A147",
+//     explorerBase: "https://etherscan.io/tx/",
+//     expiry: 100,
+//   },
+// }
 
-const ProposalStatus = {
-  Inactive: 0,
-  Active: 1,
-  Passed: 2,
-  Executed: 3,
-  Cancelled: 4
-}
-
-const FILEPATH = `./logs/chainbridge-logfile-${Date.now()}.txt`;
-
-traceTx = async (originId, deposit, transferRecord) => {
-  const {destinationChainID, depositNonce} = deposit.returnValues;
+const traceDeposit = async (originId, deposit, transferRecord, destChain) => {
+  const {depositNonce} = deposit.returnValues;
   const {_amount, _destinationRecipientAddress} = transferRecord;
   // Select the destination chain
-  const chain = chains[destinationChainID];
-  const BridgeInstance = new chain.web3.eth.Contract(bridge.abi, chain.bridgeAddress);
+  const BridgeInstance = new destChain.web3.eth.Contract(bridge.abi, destChain.bridgeAddress);
   // Build the datahash
-  const dataHash = createDataHash(_amount, _destinationRecipientAddress, chain.handlerAddress, originId, deposit.transactionHash);
+  const dataHash = createDataHash(_amount, _destinationRecipientAddress, destChain.handlerAddress, originId, deposit.transactionHash);
   if (!dataHash) return; // Error processing
   // Query for the proposal
   const proposal = await BridgeInstance.methods.getProposal(originId, depositNonce, dataHash).call();
 
-  switch (parseInt(proposal._status)) {
-    case ProposalStatus.Inactive:
-        log(`
-        [NOT FOUND] - A deposit had no corresponding proposal on the destination chain.
-        Deposit tx: ${chains[originId].explorerBase}${deposit.transactionHash}
-        ResourceId: ${transferRecord._resourceID}
-        Proposal Query: originId: ${originId} depositNonce: ${depositNonce} dataHash: ${dataHash} 
-        =========
-        `)
-    case ProposalStatus.Active:
-      if (currentBlock - parseInt(proposal._proposedBlock) > expiry) {
-        log(`
-        [EXPIRED] - An active proposal has expired, the status has not changed to "4" (expired).
-        Deposit tx: ${chains[originId].explorerBase}${deposit.transactionHash}
-        ResourceId: ${transferRecord._resourceID}
-        Proposal Query: originId: ${originId} depositNonce: ${depositNonce} dataHash: ${dataHash} 
-        =========
-        `)
-      }
-    case ProposalStatus.Passed:
-      log(`
-      [STUCK] - A proposal that met the threshold has not been executed.
-      Deposit tx: ${chains[originId].explorerBase}${deposit.transactionHash}
-      ResourceId: ${transferRecord._resourceID}
-      Proposal Query: originId: ${originId} depositNonce: ${depositNonce} dataHash: ${dataHash} 
-      =========
-      `)
-    case ProposalStatus.Executed:
-      // todo
-      // Can probably just ignore this case all together
-    case ProposalStatus.Cancelled:
-      log(`
-      [CANCELLED] - A proposal has been cancelled. 
-      Deposit tx: ${chains[originId].explorerBase}${deposit.transactionHash}
-      ResourceId: ${transferRecord._resourceID}
-      Proposal Query: originId: ${originId} depositNonce: ${depositNonce} dataHash: ${dataHash} 
-      =========
-      `)
+  return {
+    dataHash,
+    proposal
   }
 }
 
-const log = async (msg) => {
-  if (!fs.existsSync(FILEPATH)) {
-    console.log(msg)
-    fs.writeFileSync(FILEPATH, msg);
-  } else {
-    console.log(msg)
-    fs.appendFileSync(FILEPATH, msg);
-  }
-}
-
-const createDataHash = (amount, recipient, destHandler, originId, transactionHash) => {
-  if (recipient.substr(0, 2) === "0x") {
-          recipient = recipient.substr(2)
-  }
-  const bigAmount = ethers.BigNumber.from(amount);
-  try {
-    const data = '0x' +
-      ethers.utils.hexZeroPad(ethers.utils.hexlify(bigAmount.toHexString()), 32).substr(2) +
-      ethers.utils.hexZeroPad(ethers.utils.hexlify(recipient.length / 2 + recipient.length % 2), 32).substr(2) +
-      recipient;
-      return ethers.utils.solidityKeccak256(["address", "bytes"], [destHandler, data]);
-    } catch (e) {
-      log("~~~~~~~")
-      log(`Couldn't process the deposit: ${chains[originId].explorerBase}${transactionHash}`)
-      log(e)
-      log("~~~~~~~")
-      return;
-  }
-}
-
-const main = async () => {
+/**
+ * trace - Traces all deposits from one chain to another
+ * @param {Object} chains
+ */
+const trace = async (chains) => {
   for (const key in chains) {
     const chain = chains[key];
     const BridgeInstance = new chain.web3.eth.Contract(bridge.abi, chain.bridgeAddress);
@@ -183,17 +112,12 @@ const main = async () => {
         deposit.returnValues.depositNonce
       ).call();
       // Trace the transaction
-      await traceTx(chain.chainId, deposit, transferRecord);
+      const trace = await traceDeposit(chain.chainId, deposit, transferRecord, chains[deposit.returnValues.destinationChainID]);
     }
   }
 }
 
-// We recommend this pattern to be able to use async/await everywhere
-// and properly handle errors.
-main()
-  .then(() => process.exit(0))
-  .catch(error => {
-    console.error(error);
-    process.exit(1);
-  });
-
+module.exports = {
+  trace,
+  traceDeposit,
+}
