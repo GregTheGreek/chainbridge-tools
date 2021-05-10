@@ -52,6 +52,16 @@ const erc20 = require("./abi/IERC20.json");
   }
 */
 const chains = {
+  "2": {
+    chainId: 2,
+    name: "Ava",
+    web3: new Web3(process.argv[3]),
+    fromBlock: 29954,
+    bridgeAddress: "0x6460777cDa22AD67bBb97536FFC446D65761197E",
+    handlerAddress: "0x6147F5a1a4eEa5C529e2F375Bd86f8F58F8Bc990",
+    explorerBase: "https://cchain.explorer.avax.network/tx/",
+    expiry: 7200000,
+  },
   "1": {
     chainId: 1,
     name: "Ethereum",
@@ -63,16 +73,6 @@ const chains = {
     explorerBase: "https://etherscan.io/tx/",
     expiry: 100,
   },
-  "2": {
-    chainId: 2,
-    name: "Ava",
-    web3: new Web3(process.argv[3]),
-    fromBlock: 29954,
-    bridgeAddress: "0x6460777cDa22AD67bBb97536FFC446D65761197E",
-    handlerAddress: "0x6147F5a1a4eEa5C529e2F375Bd86f8F58F8Bc990",
-    explorerBase: "https://cchain.explorer.avax.network/tx/",
-    expiry: 7200000,
-  }
 }
 
 const ProposalStatus = {
@@ -153,10 +153,9 @@ const createDataHash = (amount, recipient, destHandler, originId, transactionHas
           recipient = recipient.substr(2)
   }
   const bigAmount = ethers.BigNumber.from(amount);
-  const hexAmount = ethers.utils.hexValue(bigAmount);
   try {
     const data = '0x' +
-      ethers.utils.hexZeroPad(ethers.utils.hexlify(hexAmount), 32).substr(2) +
+      ethers.utils.hexZeroPad(ethers.utils.hexlify(bigAmount.toHexString()), 32).substr(2) +
       ethers.utils.hexZeroPad(ethers.utils.hexlify(recipient.length / 2 + recipient.length % 2), 32).substr(2) +
       recipient;
       return ethers.utils.solidityKeccak256(["address", "bytes"], [destHandler, data]);
