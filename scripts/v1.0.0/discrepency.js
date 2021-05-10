@@ -159,24 +159,18 @@ const main = async () => {
       await doAccounting(chain.chainId, trace.proposal,deposit, trace.dataHash, transferRecord);
     }
     for (address in transfers[key]) {
-      console.log(key)
-      console.log(address)
-      console.log(transfers[key])
-      console.log(transfers)
       const tokenInstance = new chain.web3.eth.Contract(erc20.abi, address);
       const name = await tokenInstance.methods.name().call();
       const decimals = await tokenInstance.methods.decimals().call();
-      console.log(`
+      log(`
       ${name}
       Address: ${address} 
-      Balance: ${chain[address].div(new BigNumber(10**decimals))}
+      Balance: ${transfers[key][address].div(new BigNumber(10**decimals))}
       -------`)
     }
   }
 }
 
-// We recommend this pattern to be able to use async/await everywhere
-// and properly handle errors.
 main()
   .then(() => process.exit(0))
   .catch(error => {{}
