@@ -1,13 +1,10 @@
 /**
  * This file helps track a deposit from one chain to another.
  */
-
-/**
- * This file aims to calculate the total value deposited.
- */
 const Web3 = require("web3");
 const BigNumber = require('bignumber.js');
 const ethers = require("ethers");
+const fs = require('fs')
 
 const bridge = require("./abi/Bridge.json");
 const handler = require("./abi/ERC20Handler.json");
@@ -62,15 +59,19 @@ const chains = {
     fromBlock: 12388196,
     // fromBlock: 11688196,
     bridgeAddress: "0x96B845aBE346b49135B865E5CeDD735FC448C3aD",
-    handlerAddress: "0xdAC7Bb7Ce4fF441A235F08408e632FA1D799A147"
+    handlerAddress: "0xdAC7Bb7Ce4fF441A235F08408e632FA1D799A147",
+    explorerBase: "https://etherscan.io/tx/",
+    expiry: 100,
   },
   "2": {
     chainId: 2,
     name: "Ava",
     web3: new Web3(process.argv[3]),
-    fromBlock: 0,
+    fromBlock: 29954,
     bridgeAddress: "0x6460777cDa22AD67bBb97536FFC446D65761197E",
-    handlerAddress: "0x6147F5a1a4eEa5C529e2F375Bd86f8F58F8Bc990"
+    handlerAddress: "0x6147F5a1a4eEa5C529e2F375Bd86f8F58F8Bc990",
+    explorerBase: "https://cchain.explorer.avax.network/tx/",
+    expiry: 7200000,
   }
 }
 
@@ -82,36 +83,93 @@ const ProposalStatus = {
   Cancelled: 4
 }
 
-async function traceTx(originId, deposit, transferRecord) {
-  const {destinationChainID, resourceID, depositNonce} = deposit.returnValues;
+const FILEPATH = `./logs/chainbridge-logfile-${Date.now()}.txt`;
+
+traceTx = async (originId, deposit, transferRecord) => {
+  const {destinationChainID, depositNonce} = deposit.returnValues;
   const {_amount, _destinationRecipientAddress} = transferRecord;
   // Select the destination chain
   const chain = chains[destinationChainID];
   const BridgeInstance = new chain.web3.eth.Contract(bridge.abi, chain.bridgeAddress);
   // Build the datahash
-  const dataHash = createDataHash(_amount, _destinationRecipientAddress, chain.handlerAddress);
-  console.log(dataHash)
-  // Query for teh proposal
-  const proposal = await BridgeInstance.methods._proposals(originId, dataHash).call();
+  const dataHash = createDataHash(_amount, _destinationRecipientAddress, chain.handlerAddress, originId, deposit.transactionHash);
+  if (!dataHash) return; // Error processing
+  // Query for the proposal
+  const proposal = await BridgeInstance.methods.getProposal(originId, depositNonce, dataHash).call();
 
-  console.log(proposal);  
-  process.exit();
+  switch (parseInt(proposal._status)) {
+    case ProposalStatus.Inactive:
+        log(`
+        [NOT FOUND] - A deposit had no corresponding proposal on the destination chain.
+        Deposit tx: ${chains[originId].explorerBase}${deposit.transactionHash}
+        ResourceId: ${transferRecord._resourceID}
+        Proposal Query: originId: ${originId} depositNonce: ${depositNonce} dataHash: ${dataHash} 
+        =========
+        `)
+    case ProposalStatus.Active:
+      if (currentBlock - parseInt(proposal._proposedBlock) > expiry) {
+        log(`
+        [EXPIRED] - An active proposal has expired, the status has not changed to "4" (expired).
+        Deposit tx: ${chains[originId].explorerBase}${deposit.transactionHash}
+        ResourceId: ${transferRecord._resourceID}
+        Proposal Query: originId: ${originId} depositNonce: ${depositNonce} dataHash: ${dataHash} 
+        =========
+        `)
+      }
+    case ProposalStatus.Passed:
+      log(`
+      [STUCK] - A proposal that met the threshold has not been executed.
+      Deposit tx: ${chains[originId].explorerBase}${deposit.transactionHash}
+      ResourceId: ${transferRecord._resourceID}
+      Proposal Query: originId: ${originId} depositNonce: ${depositNonce} dataHash: ${dataHash} 
+      =========
+      `)
+    case ProposalStatus.Executed:
+      // todo
+      // Can probably just ignore this case all together
+    case ProposalStatus.Cancelled:
+      log(`
+      [CANCELLED] - A proposal has been cancelled. 
+      Deposit tx: ${chains[originId].explorerBase}${deposit.transactionHash}
+      ResourceId: ${transferRecord._resourceID}
+      Proposal Query: originId: ${originId} depositNonce: ${depositNonce} dataHash: ${dataHash} 
+      =========
+      `)
+  }
 }
 
-const createDataHash = (amount, recipient, destHandler) => {
+const log = async (msg) => {
+  if (!fs.existsSync(FILEPATH)) {
+    console.log(msg)
+    fs.writeFileSync(FILEPATH, msg);
+  } else {
+    console.log(msg)
+    fs.appendFileSync(FILEPATH, msg);
+  }
+}
+
+const createDataHash = (amount, recipient, destHandler, originId, transactionHash) => {
   if (recipient.substr(0, 2) === "0x") {
           recipient = recipient.substr(2)
   }
   const bigAmount = ethers.BigNumber.from(amount);
   const hexAmount = ethers.utils.hexValue(bigAmount);
-  const data = '0x' +
+  try {
+    const data = '0x' +
       ethers.utils.hexZeroPad(ethers.utils.hexlify(hexAmount), 32).substr(2) +
       ethers.utils.hexZeroPad(ethers.utils.hexlify(recipient.length / 2 + recipient.length % 2), 32).substr(2) +
       recipient;
-  return ethers.utils.solidityKeccak256(["address", "bytes"], [destHandler, data]);
+      return ethers.utils.solidityKeccak256(["address", "bytes"], [destHandler, data]);
+    } catch (e) {
+      log("~~~~~~~")
+      log(`Couldn't process the deposit: ${chains[originId].explorerBase}${transactionHash}`)
+      log(e)
+      log("~~~~~~~")
+      return;
+  }
 }
 
-async function main() {
+const main = async () => {
   for (const key in chains) {
     const chain = chains[key];
     const BridgeInstance = new chain.web3.eth.Contract(bridge.abi, chain.bridgeAddress);
@@ -129,47 +187,6 @@ async function main() {
       await traceTx(chain.chainId, deposit, transferRecord);
     }
   }
-}
-
-async function main1() {
-  const web3 = new Web3(process.argv[2]);
-  const BridgeInstance = new web3.eth.Contract(bridge.abi, "0x96B845aBE346b49135B865E5CeDD735FC448C3aD");
-  const HandlerInstance = new web3.eth.Contract(handler.abi, "0xdAC7Bb7Ce4fF441A235F08408e632FA1D799A147");
-
-  const deposits = await BridgeInstance.getPastEvents("Deposit", {
-    fromBlock: 11688196
-  })
-  const totalDeposits = deposits.length;
-
-  // for (let i=0;i<10;i++) {
-  for (let i=0;i<totalDeposits;i++) {
-    process.stdout.write(`Processing deposit ${i + 1}/${totalDeposits} \r`);
-    const deposit = deposits[i];
-    const {destinationChainID, resourceID, depositNonce} = deposit.returnValues;
-
-    const handlerAddress = await BridgeInstance.methods._resourceIDToHandlerAddress(resourceID).call();
-    if (handlerAddress == HandlerInstance._address) {
-      const {_tokenAddress, _amount, _depositer} = await HandlerInstance.methods._depositRecords(destinationChainID, depositNonce).call();
-      if (!db.deposits[_tokenAddress]) {
-        const tokenInstance = new web3.eth.Contract(erc20.abi, _tokenAddress);
-        const name = await tokenInstance.methods.name().call();
-        const decimals = await tokenInstance.methods.decimals().call();
-        db.deposits[_tokenAddress] = {
-          deposits: [],
-          name,
-          decimals,
-          totalTokens: new BigNumber(0)
-        };
-      }
-      const amount = new BigNumber(_amount);
-      db.deposits[_tokenAddress].deposits.push({
-        amount: amount,
-        from: _depositer,
-        block: deposit.blockNumber
-      })
-      db.deposits[_tokenAddress].totalTokens = db.deposits[_tokenAddress].totalTokens.plus(amount);
-    }
-  };
 }
 
 // We recommend this pattern to be able to use async/await everywhere
