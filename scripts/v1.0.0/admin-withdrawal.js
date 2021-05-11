@@ -4,12 +4,13 @@
 const Web3 = require("web3");
 const BigNumber = require('bignumber.js');
 const fs = require('fs')
+const abiDecoder = require('abi-decoder');
 
 const bridge = require("./abi/Bridge.json");
 const multisig = require('./abi/Multisig.json');
 const erc20 = require("./abi/IERC20.json");
 const fetch = require("node-fetch");
-const abiDecoder = require('abi-decoder');
+const {log} = require("./common");
 
 abiDecoder.addABI(multisig);
 abiDecoder.addABI(bridge.abi);
@@ -72,18 +73,6 @@ const chains = {
     },
 }
 
-const FILEPATH = `./logs/chainbridge-logfile-${Date.now()}.txt`;
-
-const log = async (msg) => {
-    if (!fs.existsSync(FILEPATH)) {
-        console.log(msg)
-        fs.writeFileSync(FILEPATH, msg);
-    } else {
-        console.log(msg)
-        fs.appendFileSync(FILEPATH, msg);
-    }
-}
-
 const fetchAdminWithdrawals = async () => {
     const withdrawalByChain = {}
     for (const key in chains) {
@@ -144,12 +133,6 @@ const fetchAdminWithdrawals = async () => {
     return withdrawalByChain;
 }
 
-// We recommend this pattern to be able to use async/await everywhere
-// and properly handle errors.
-fetchAdminWithdrawals()
-    .then(() => process.exit(0))
-    .catch(error => {
-        console.error(error);
-        process.exit(1);
-    });
-
+module.exports = {
+    fetchAdminWithdrawals
+}

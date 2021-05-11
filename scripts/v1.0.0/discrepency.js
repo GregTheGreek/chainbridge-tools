@@ -9,56 +9,17 @@ const fs = require('fs')
 const bridge = require("./abi/Bridge.json");
 const handler = require("./abi/ERC20Handler.json");
 const erc20 = require("./abi/IERC20.json");
-const {log, createDataHash, ProposalStatus} = require("./common");
-const {traceDeposit} = require("./trace");
-/**
- * Deposit Event
- * {
-  address: '0x96B845aBE346b49135B865E5CeDD735FC448C3aD',
-  blockHash: '0x9a49eeb53403c8a1de9f340ddf18004f3f0b2e0294d4469bd5eefe68ccbf13ab',
-  blockNumber: 12388282,
-  logIndex: 113,
-  removed: false,
-  transactionHash: '0x2bfda39664dea7f212778415145d8c52571ab3ab20d8edfbe805891f1665bb36',
-  transactionIndex: 147,
-  id: 'log_18f2f174',
-  returnValues: Result {
-    '0': '2',
-    '1': '0x0000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc201',
-    '2': '7961',
-    destinationChainID: '2',
-    resourceID: '0x0000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc201',
-    depositNonce: '7961'
-  },
-  event: 'Deposit',
-  signature: '0xdbb69440df8433824a026ef190652f29929eb64b4d1d5d2a69be8afe3e6eaed8',
-  raw: {
-    data: '0x',
-    topics: [
-      '0xdbb69440df8433824a026ef190652f29929eb64b4d1d5d2a69be8afe3e6eaed8',
-      '0x0000000000000000000000000000000000000000000000000000000000000002',
-      '0x0000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc201',
-      '0x0000000000000000000000000000000000000000000000000000000000001f19'
-    ]
-  }
-}
-* TransferRecord
-  {
-    _tokenAddress: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
-    _lenDestinationRecipientAddress: '20',
-    _destinationChainID: '2',
-    _resourceID: '0x0000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc201',
-    _destinationRecipientAddress: '0xd242a88f202b793a80a353264f1c51d292bc951b',
-    _depositer: '0xd242a88f202B793a80A353264F1C51D292bc951b',
-    _amount: '10000000000000000000'
-  }
-*/
+const {log, ProposalStatus} = require("./common");
+const {traceDeposit} = require("./traceDeposit");
+const {fetchAdminWithdrawals} = require("./admin-withdrawal");
+
 const chains = {
   "2": {
     chainId: 2,
     name: "Ava",
     web3: new Web3(process.argv[3]),
-    fromBlock: 29954,
+    fromBlock: 1399852,
+    // fromBlock: 29954,
     bridgeAddress: "0x6460777cDa22AD67bBb97536FFC446D65761197E",
     handlerAddress: "0x6147F5a1a4eEa5C529e2F375Bd86f8F58F8Bc990",
     explorerBase: "https://cchain.explorer.avax.network/tx/",
@@ -68,7 +29,7 @@ const chains = {
     chainId: 1,
     name: "Ethereum",
     web3: new Web3(process.argv[2]),
-    fromBlock: 12388196,
+    fromBlock: 12403219,
     // fromBlock: 11688196,
     bridgeAddress: "0x96B845aBE346b49135B865E5CeDD735FC448C3aD",
     handlerAddress: "0xdAC7Bb7Ce4fF441A235F08408e632FA1D799A147",
@@ -90,9 +51,9 @@ const incTransfer = (originId, tokenAddress, _amount) => {
   transfers[originId][tokenAddress] = transfers[originId][tokenAddress].plus(amount)
 }
 
-const doAccounting = async (originId, proposal, deposit, dataHash, transferRecord) => {
-
+const doAccounting = async (web3, originId, proposal, deposit, dataHash, transferRecord) => {
   const {depositNonce} = deposit.returnValues;
+  const currentBlock = await web3.eth.getBlockNumber();
   switch (parseInt(proposal._status)) {
     case ProposalStatus.Inactive:
       incTransfer(originId, transferRecord._tokenAddress, transferRecord._amount);
@@ -105,7 +66,7 @@ const doAccounting = async (originId, proposal, deposit, dataHash, transferRecor
       =========
       `)
     case ProposalStatus.Active:
-      if (currentBlock - parseInt(proposal._proposedBlock) > expiry) {
+      if (currentBlock - parseInt(proposal._proposedBlock) > chains[transferRecord._destinationChainID].expiry) {
         incTransfer(originId, transferRecord._tokenAddress, transferRecord._amount);
 
         log(`
@@ -140,7 +101,26 @@ const doAccounting = async (originId, proposal, deposit, dataHash, transferRecor
   }
 }
 
+const formatTokens = async (chain, chainId) => {
+  res = {}
+  for (address in transfers[chainId]) {
+    const tokenInstance = new chain.web3.eth.Contract(erc20.abi, address);
+    const name = await tokenInstance.methods.name().call();
+    const symbol = await tokenInstance.methods.symbol().call()
+    const decimals = await tokenInstance.methods.decimals().call();
+    res[address] = {
+        name: name,
+        symbol: symbol,
+        decimals: decimals,
+        formattedValue: transfers[chainId][address].div(new BigNumber(10).exponentiatedBy(new BigNumber(decimals))),
+        value: transfers[chainId][address]
+    }
+  };
+  return res;
+}
+
 const main = async () => {
+  const data = {}
   for (const key in chains) {
     const chain = chains[key];
     const BridgeInstance = new chain.web3.eth.Contract(bridge.abi, chain.bridgeAddress);
@@ -156,19 +136,31 @@ const main = async () => {
       ).call();
       // Trace the transaction
       const trace = await traceDeposit(chain.chainId, deposit, transferRecord, chains[deposit.returnValues.destinationChainID]);
-      await doAccounting(chain.chainId, trace.proposal,deposit, trace.dataHash, transferRecord);
+      await doAccounting(chain.web3, chain.chainId, trace.proposal,deposit, trace.dataHash, transferRecord);
     }
-    for (address in transfers[key]) {
-      const tokenInstance = new chain.web3.eth.Contract(erc20.abi, address);
-      const name = await tokenInstance.methods.name().call();
-      const decimals = await tokenInstance.methods.decimals().call();
-      log(`
-      ${name}
-      Address: ${address} 
-      Balance: ${transfers[key][address].div(new BigNumber(10**decimals))}
-      -------`)
-    }
+    if (!data[key]) data[key] = {};
+    data[key]["cancelled"] = await formatTokens(chain, key);
   }
+  const admins = await fetchAdminWithdrawals();
+  Object.keys(admins).forEach((key) => { data[key]["adminTransfer"] = admins[key] })
+  const display = {}
+  Object.keys(data).forEach((chainId) => {
+    const deposits = data[chainId]["cancelled"];
+    const admins = data[chainId]["adminTransfer"];
+    
+    Object.keys(deposits).forEach(key => {
+      if (!display[chainId]) display[chainId] = {"user_deposits": {}, "admin_withdraw": {}};
+      const token = deposits[key];
+      console.log(display)
+      display[chainId]["user_deposits"][token.name] = token.formattedValue.toString(); 
+    })
+    Object.keys(admins).forEach(key => {
+      if (!display[chainId]) display[chainId] = {};
+      const token = admins[key];
+      display[chainId]["admin_withdraw"][token.name] = token.formattedValue.toString(); 
+    })
+  })
+  console.log(display)
 }
 
 main()
